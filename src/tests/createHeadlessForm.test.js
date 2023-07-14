@@ -18,7 +18,6 @@ import {
   schemaInputTypeSelectMultipleDeprecated,
   schemaInputTypeSelectMultiple,
   schemaInputTypeSelectMultipleOptional,
-  schemaInputTypeInteger,
   schemaInputTypeNumber,
   schemaInputTypeNumberZeroMaximum,
   schemaInputTypeDate,
@@ -42,6 +41,7 @@ import {
   mockTextInputDeprecated,
   mockNumberInput,
   mockNumberInputWithPercentageAndCustomRange,
+  schemaInputTypeIntegerNumber,
   mockTextPatternInput,
   mockTextMaxLengthInput,
   mockFieldset,
@@ -903,39 +903,6 @@ describe('createHeadlessForm', () => {
           },
         },
       ]);
-    });
-
-    it('support "integer" field type', () => {
-      const result = createHeadlessForm(schemaInputTypeInteger);
-      expect(result).toMatchObject({
-        fields: [
-          {
-            description: 'How many open tabs do you have?',
-            label: 'Tabs',
-            name: 'tabs',
-            required: true,
-            schema: expect.any(Object),
-            type: 'integer',
-            minimum: 1,
-            maximum: 10,
-          },
-        ],
-      });
-
-      const fieldValidator = result.fields[0].schema;
-      expect(fieldValidator.isValidSync('0')).toBe(false);
-      expect(fieldValidator.isValidSync('10')).toBe(true);
-      expect(fieldValidator.isValidSync('11')).toBe(false);
-      expect(fieldValidator.isValidSync('5.5')).toBe(false);
-      expect(fieldValidator.isValidSync('1.0')).toBe(true);
-      expect(fieldValidator.isValidSync('this is text with a number 1')).toBe(false);
-      expect(() => fieldValidator.validateSync('5.5')).toThrowError(
-        'Must not contain decimal points. E.g. 5 instead of 5.5'
-      );
-      expect(() => fieldValidator.validateSync('some text')).toThrowError(
-        'The value must be a number'
-      );
-      expect(() => fieldValidator.validateSync('')).toThrowError('The value must be a number');
     });
 
     it('support "number" field type', () => {
@@ -2161,6 +2128,34 @@ describe('createHeadlessForm', () => {
 
         expect(validateForm({ tabs: 1 })).toEqual({
           tabs: 'Must be smaller or equal to 0',
+        });
+      });
+    });
+    describe('and type is integer', () => {
+      it('should validate field', () => {
+        const { handleValidation } = createHeadlessForm(schemaInputTypeIntegerNumber);
+        const validateForm = (vals) => friendlyError(handleValidation(vals));
+
+        expect(validateForm({ tabs: '10' })).toBeUndefined();
+        expect(validateForm({ tabs: '1.0' })).toBeUndefined();
+
+        expect(validateForm({ tabs: '0' })).toEqual({
+          tabs: 'Must be greater or equal to 1',
+        });
+        expect(validateForm({ tabs: '11' })).toEqual({
+          tabs: 'Must be smaller or equal to 10',
+        });
+        expect(validateForm({ tabs: '5.5' })).toEqual({
+          tabs: 'Must not contain decimal points. E.g. 5 instead of 5.5',
+        });
+        expect(validateForm({ tabs: 'this is text with a number 1' })).toEqual({
+          tabs: 'The value must be a number',
+        });
+        expect(validateForm({ tabs: 'some text' })).toEqual({
+          tabs: 'The value must be a number',
+        });
+        expect(validateForm({ tabs: '' })).toEqual({
+          tabs: 'The value must be a number',
         });
       });
     });
