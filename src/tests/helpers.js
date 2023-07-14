@@ -57,6 +57,21 @@ export const mockNumberInput = {
   type: 'number',
 };
 
+export const schemaInputTypeNumberZeroMaximum = {
+  properties: {
+    tabs: {
+      title: 'Tabs',
+      description: 'How many open tabs do you have?',
+      'x-jsf-presentation': {
+        inputType: 'number',
+      },
+      minimum: -100,
+      maximum: 0,
+      type: 'number',
+    },
+  },
+};
+
 export const mockNumberInputWithPercentage = {
   title: 'Shares',
   description: 'What % of shares do you own?',
@@ -122,28 +137,6 @@ export const mockRadioInput = {
     inputType: 'radio',
   },
   type: 'string',
-};
-export const mockRadioInputOptional = {
-  title: 'Has car',
-  description: 'Do you have a car? (optional field, check oneOf)',
-  oneOf: [
-    {
-      const: null, // The option is excluded from the jsf options.
-      title: 'N/A',
-    },
-    {
-      const: 'yes',
-      title: 'Yes',
-    },
-    {
-      const: 'no',
-      title: 'No',
-    },
-  ],
-  'x-jsf-presentation': {
-    inputType: 'radio',
-  },
-  type: ['string', 'null'],
 };
 
 export const mockRadioCardExpandableInput = {
@@ -867,34 +860,106 @@ export const schemaInputDeprecated = JSONSchemaBuilder()
   .build();
 
 /** @deprecated */
-export const schemaInputTypeRadioDeprecated = JSONSchemaBuilder()
-  .addInput({
+export const schemaInputTypeRadioDeprecated = {
+  properties: {
     has_siblings: mockRadioInputDeprecated,
-  })
-  .setRequiredFields(['has_siblings'])
-  .build();
-export const schemaInputTypeRadio = JSONSchemaBuilder()
-  .addInput({
-    has_siblings: mockRadioInput,
-  })
-  .setRequiredFields(['has_siblings'])
-  .build();
+  },
+  required: ['has_siblings'],
+};
 
-export const schemaInputTypeRadioRequiredAndOptional = JSONSchemaBuilder()
-  .addInput({
+export const schemaInputTypeRadio = {
+  properties: {
     has_siblings: mockRadioInput,
-    has_car: mockRadioInputOptional,
-  })
-  .setRequiredFields(['has_siblings'])
-  .build();
+  },
+  required: ['has_siblings'],
+};
 
-export const schemaInputTypeRadioCard = JSONSchemaBuilder()
-  .addInput({
+export const mockRadioInputOptionalNull = {
+  title: 'Has car',
+  oneOf: [
+    { const: 'yes', title: 'Yes' },
+    { const: 'no', title: 'No' },
+    // JSF excludes the null option from the field output
+    // But keepts null as an accepted value
+    { const: null, title: 'N/A' },
+  ],
+  'x-jsf-presentation': { inputType: 'radio' },
+  type: ['string', 'null'], // Yes, the JSON Schema spec is 'null', not null.
+};
+
+export const schemaInputTypeRadioRequiredAndOptional = {
+  properties: {
+    has_siblings: mockRadioInput,
+    has_car: {
+      ...mockRadioInputOptionalNull,
+      description: 'Do you have a car? (optional field, check oneOf)',
+    },
+  },
+  required: ['has_siblings'],
+};
+
+export const schemaInputRadioOptionalNull = {
+  properties: {
+    has_car: mockRadioInputOptionalNull,
+  },
+};
+
+export const schemaInputRadioOptionalConventional = {
+  properties: {
+    has_car: {
+      title: 'Has car',
+      oneOf: [
+        { const: 'yes', title: 'Yes' },
+        { const: 'no', title: 'No' },
+      ],
+      'x-jsf-presentation': { inputType: 'radio' },
+      type: 'string',
+    },
+  },
+};
+
+export const schemaInputTypeRadioCard = {
+  properties: {
     experience_level: mockRadioCardExpandableInput,
     payment_method: mockRadioCardInput,
-  })
-  .setRequiredFields(['experience_level'])
-  .build();
+  },
+  required: ['experience_level'],
+};
+
+export const schemaInputTypeRadioOptionsWithDetails = {
+  properties: {
+    health_perks: {
+      title: 'Health perks',
+      description:
+        'This example contains options with more custom details, under the x-jsf-presentation key',
+      oneOf: [
+        {
+          const: 'basic',
+          title: 'Basic',
+          'x-jsf-presentation': {
+            meta: {
+              displayCost: '$30.00/mo',
+            },
+          },
+          'x-another': 'extra-thing',
+        },
+        {
+          const: 'standard',
+          title: 'Standard',
+          'x-jsf-presentation': {
+            meta: {
+              displayCost: '$50.00/mo',
+            },
+          },
+        },
+      ],
+      'x-jsf-presentation': {
+        inputType: 'radio',
+      },
+      type: 'string',
+    },
+  },
+};
 
 /** @deprecated */
 export const schemaInputTypeSelectSoloDeprecated = JSONSchemaBuilder()
@@ -1181,8 +1246,8 @@ export const schemaWithOrderKeyword = JSONSchemaBuilder()
   .setOrder(['username', 'age', 'street'])
   .build();
 
-export const schemaDynamicValidationConst = JSONSchemaBuilder()
-  .addInput({
+export const schemaDynamicValidationConst = {
+  properties: {
     a_fieldset: mockFieldset,
     a_group_array: simpleGroupArrayInput,
     validate_tabs: {
@@ -1219,8 +1284,8 @@ export const schemaDynamicValidationConst = JSONSchemaBuilder()
         inputType: 'radio',
       },
     },
-  })
-  .addAllOf([
+  },
+  allOf: [
     {
       if: {
         properties: {
@@ -1239,27 +1304,25 @@ export const schemaDynamicValidationConst = JSONSchemaBuilder()
         },
       },
     },
-  ])
-  .addCondition(
-    {
-      properties: {
-        validate_tabs: {
-          const: 'yes',
-        },
+  ],
+  if: {
+    properties: {
+      validate_tabs: {
+        const: 'yes',
       },
-      required: ['validate_tabs'],
     },
-    {
-      properties: {
-        a_fieldset: {
-          required: ['id_number', 'tabs'],
-        },
+    required: ['validate_tabs'],
+  },
+  then: {
+    properties: {
+      a_fieldset: {
+        required: ['id_number', 'tabs'],
       },
-    }
-  )
-  .setRequiredFields(['a_fieldset', 'validate_tabs', 'mandatory_group_array'])
-  .setOrder(['validate_tabs', 'a_fieldset', 'mandatory_group_array', 'a_group_array'])
-  .build();
+    },
+  },
+  required: ['a_fieldset', 'validate_tabs', 'mandatory_group_array'],
+  'x-jsf-order': ['validate_tabs', 'a_fieldset', 'mandatory_group_array', 'a_group_array'],
+};
 
 export const schemaDynamicValidationMinimumMaximum = JSONSchemaBuilder()
   .addInput({
@@ -1643,6 +1706,126 @@ export const schemaFieldsetScopedCondition = {
   },
   required: ['child'],
   type: 'object',
+};
+
+export const schemaWithConditionalToFieldset = {
+  additionalProperties: false,
+  type: 'object',
+  properties: {
+    work_hours_per_week: {
+      title: 'Hours per week',
+      type: 'number',
+      description: 'Above 30 hours, the Perk>Food options change, and PTO is required.',
+      'x-jsf-presentation': {
+        inputType: 'number',
+      },
+    },
+    pto: {
+      title: 'Time-off (days)',
+      type: 'number',
+      'x-jsf-presentation': {
+        inputType: 'number',
+      },
+    },
+    perks: {
+      additionalProperties: false,
+      properties: {
+        food: {
+          oneOf: [
+            {
+              const: 'lunch',
+              title: 'Lunch',
+            },
+            {
+              const: 'dinner',
+              title: 'Dinner',
+            },
+            {
+              const: 'all',
+              title: 'All',
+              description: 'Every meal',
+            },
+            {
+              const: 'no',
+              title: 'No food',
+            },
+          ],
+          title: 'Food',
+          type: 'string',
+          'x-jsf-presentation': {
+            inputType: 'radio',
+          },
+        },
+        retirement: {
+          oneOf: [
+            {
+              const: 'basic',
+              title: 'Basic',
+            },
+            {
+              const: 'plus',
+              title: 'Plus',
+            },
+          ],
+          title: 'Retirement',
+          type: 'string',
+          'x-jsf-presentation': {
+            inputType: 'radio',
+          },
+        },
+      },
+      required: ['food', 'retirement'],
+      title: 'Perks',
+      type: 'object',
+      'x-jsf-presentation': {
+        inputType: 'fieldset',
+      },
+    },
+  },
+  allOf: [
+    {
+      if: {
+        properties: {
+          work_hours_per_week: {
+            minimum: 30,
+          },
+        },
+        required: ['work_hours_per_week'],
+      },
+      then: {
+        properties: {
+          pto: {
+            $comment: '@BUG: This description does not disappear once activated.',
+            description: 'Above 30 hours, the PTO needs to be at least 20 days.',
+            minimum: 20,
+          },
+          perks: {
+            properties: {
+              food: {
+                description: "Above 30 hours, the 'no' option disappears.",
+                oneOf: [
+                  {
+                    const: 'lunch',
+                    title: 'Lunch',
+                  },
+                  {
+                    const: 'dinner',
+                    title: 'Dinner',
+                  },
+                  {
+                    const: 'all',
+                    title: 'all',
+                  },
+                ],
+              },
+            },
+          },
+        },
+        required: ['pto'],
+      },
+    },
+  ],
+  required: ['perks', 'work_hours_per_week'],
 };
 
 export const schemaWorkSchedule = {

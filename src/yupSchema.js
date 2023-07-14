@@ -18,10 +18,61 @@ const todayDateHint = new Date().toISOString().substring(0, 10);
 const convertBytesToKB = convertDiskSizeFromTo('Bytes', 'KB');
 const convertKbBytesToMB = convertDiskSizeFromTo('KB', 'MB');
 
+const validateOnlyStrings = string()
+  .trim()
+  .nullable()
+  .test(
+    'is-string',
+    '${path} must be a `string` type, but the final value was: `${value}`.',
+    (value, context) => {
+      if (context.originalValue !== null && context.originalValue !== undefined) {
+        return typeof context.originalValue === 'string';
+      }
+      return true;
+    }
+  );
+
 const yupSchemas = {
-  text: string().trim().nullable(),
-  select: string().trim().nullable(),
-  radio: string().trim().nullable(),
+  text: validateOnlyStrings,
+  radioOrSelect: (options) =>
+    string()
+      .nullable()
+      .transform((value) => {
+        if (value === '') {
+          return undefined; // [1]
+        }
+        if (options?.includes(null)) {
+          return value;
+        }
+        return value === null
+          ? undefined // [2]
+          : value;
+
+        /*
+          [1] @BUG RMT-518 - explanation from PR#18
+          The "" (empty string) is to keep retrocompatibily with previous version.
+          The "" does NOT match the JSON Schema specs. In the specs the `oneOf` keyword does not allow "" value by default.
+
+          Disallowing "" would be a major BREAKING CHANGE
+          because previously any string was allowed but now only the options[].value are,
+          which means we'd need to also exclude "" from being accepted.   
+          This would be a dangerous change as it can disrupt existing UI Form integrations
+          that might handle empty fields differently ("" vs null vs undefined).
+
+          [2] The null also needs to be always allowed for the same reason.
+              Some consumers (eg Remote) expect empty optional fields to be sent as "null"
+              even when their JSON Schemas are not created correctly (missing an option with const: null).
+              This will allow the JSF to still mark the field as valid (false positive)
+              and let the JSON Schema validator fail.
+
+          We'd need to implement a feature_flag/transition deprecation warning
+          to give devs the time to adapt their integrations before we fix this behavior.
+          Check the PR#18 and tests for more details.
+        */
+      })
+      .oneOf(options, ({ value }) => {
+        return `The option ${JSON.stringify(value)} is not valid.`;
+      }),
   date: string()
     .nullable()
     .trim()
@@ -60,8 +111,32 @@ function getRequiredErrorMessage(inputType, { inlineError, configError }) {
 
 const getJsonTypeInArray = (jsonType) =>
   Array.isArray(jsonType)
-    ? jsonType.find((val) => val !== 'null') // eg ["string", "null"] // optional fields - get the lead type.
+    ? jsonType.find((val) => val !== 'null') // eg ["string", "null"] // optional fields - get the head type.
     : jsonType; // eg "string"
+
+const getOptions = (field) => {
+  const allValues = field.options?.map((option) => option.value);
+
+  const isOptionalWithNull =
+    Array.isArray(field.jsonType) &&
+    // @TODO should also check the "oneOf" directly looking for "null"
+    // option but we don't have direct access at this point.
+    // Otherwise the JSON Schema validator will fail as explained in PR#18
+    field.jsonType.includes('null');
+
+  return isOptionalWithNull ? [...allValues, null] : allValues;
+};
+
+const getYupSchema = ({ inputType, ...field }) => {
+  const jsonType = getJsonTypeInArray(field.jsonType);
+
+  if (field.options?.length > 0) {
+    const optionValues = getOptions(field);
+    return yupSchemas.radioOrSelect(optionValues);
+  }
+
+  return yupSchemas[inputType] || yupSchemasToJsonTypes[jsonType];
+};
 
 /**
  * @param {FieldParameters} field Input fields
@@ -71,7 +146,6 @@ export function buildYupSchema(field, config) {
   const { inputType, jsonType: jsonTypeValue, errorMessage = {}, ...propertyFields } = field;
   const isCheckboxBoolean = typeof propertyFields.checkboxValue === 'boolean';
   let baseSchema;
-  const jsonType = getJsonTypeInArray(jsonTypeValue);
   const errorMessageFromConfig = config?.inputTypes?.[inputType]?.errorMessage || {};
 
   if (propertyFields.multiple) {
@@ -80,7 +154,7 @@ export function buildYupSchema(field, config) {
   } else if (isCheckboxBoolean) {
     baseSchema = yupSchemas.checkboxBool;
   } else {
-    baseSchema = yupSchemas[inputType] || yupSchemasToJsonTypes[jsonType];
+    baseSchema = getYupSchema(field);
   }
 
   if (!baseSchema) {
@@ -256,7 +330,8 @@ export function buildYupSchema(field, config) {
     validators.push(withMinLength);
   }
 
-  if (propertyFields.maximum) {
+  // support maximum with 0 value
+  if (propertyFields.maximum !== undefined) {
     validators.push(withMax);
   }
 

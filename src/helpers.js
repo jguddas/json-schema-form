@@ -107,9 +107,18 @@ function checkIfConditionMatches(node, formValues, formFields) {
       return currentProperty.enum.includes(value);
     }
 
-    const { inputType } = getField(name, formFields);
+    const field = getField(name, formFields);
 
-    return validateFieldSchema({ ...currentProperty, inputType, required: true }, value);
+    return validateFieldSchema(
+      {
+        options: field.options,
+        // @TODO/CODE SMELL. We are passing the property (raw field), but buildYupSchema() expected the output field.
+        ...currentProperty,
+        inputType: field.inputType,
+        required: true,
+      },
+      value
+    );
   });
 }
 
@@ -314,6 +323,8 @@ function processNode(node, formValues, formFields, accRequired = new Set()) {
 
   if (node.if) {
     const matchesCondition = checkIfConditionMatches(node, formValues, formFields);
+    // BUG HERE (unreleated) - what if it matches but doesn't has a then,
+    // it should do nothing, but instead it jumps to node.else when it shouldn't.
     if (matchesCondition && node.then) {
       const { required: branchRequired } = processNode(
         node.then,
@@ -406,12 +417,27 @@ export function updateFieldsProperties(fields, formValues, jsonSchema) {
 
 const notNullOption = (opt) => opt.const !== null;
 
+function flatPresentation(item) {
+  return Object.entries(item).reduce((newItem, [key, value]) => {
+    if (key === 'x-jsf-presentation') {
+      return {
+        ...newItem,
+        ...value,
+      };
+    }
+    return {
+      ...newItem,
+      [key]: value,
+    };
+  }, {});
+}
+
 function getFieldOptions(node, presentation) {
   function convertToOptions(nodeOptions) {
     return nodeOptions.filter(notNullOption).map(({ title, const: cons, ...item }) => ({
       label: title,
       value: cons,
-      ...item,
+      ...flatPresentation(item),
     }));
   }
 
