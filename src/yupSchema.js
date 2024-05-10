@@ -1,9 +1,10 @@
 import flow from 'lodash/flow';
 import noop from 'lodash/noop';
 import { randexp } from 'randexp';
-import { string, number, boolean, object, array } from 'yup';
+import { string, number, boolean, object, array, mixed } from 'yup';
 
 import { supportedTypes } from './internals/fields';
+import { yupSchemaWithCustomJSONLogic } from './jsonLogic';
 import { convertDiskSizeFromTo } from './utils';
 
 /**
@@ -32,16 +33,59 @@ const validateOnlyStrings = string()
     }
   );
 
+const compareDates = (d1, d2) => {
+  let date1 = new Date(d1).getTime();
+  let date2 = new Date(d2).getTime();
+
+  if (date1 < date2) {
+    return 'LESSER';
+  } else if (date1 > date2) {
+    return 'GREATER';
+  } else {
+    return 'EQUAL';
+  }
+};
+
+const validateMinDate = (value, minDate) => {
+  const compare = compareDates(value, minDate);
+
+  return compare === 'GREATER' || compare === 'EQUAL' ? true : false;
+};
+
+const validateMaxDate = (value, minDate) => {
+  const compare = compareDates(value, minDate);
+
+  return compare === 'LESSER' || compare === 'EQUAL' ? true : false;
+};
+
+/* 
+  Custom test determines if the value either:
+  - Matches a specific option by value
+  - Matches a pattern
+  If the option is undefined do not test, to allow for optional fields. 
+*/
+const validateRadioOrSelectOptions = (value, options) => {
+  if (value === undefined) return true;
+
+  const exactMatch = options.some((option) => option.value === value);
+
+  if (exactMatch) return true;
+
+  const patternMatch = options.some((option) => option.pattern?.test(value));
+
+  return !!patternMatch;
+};
+
 const yupSchemas = {
   text: validateOnlyStrings,
-  radioOrSelect: (options) =>
-    string()
+  radioOrSelectString: (options) => {
+    return string()
       .nullable()
       .transform((value) => {
         if (value === '') {
           return undefined; // [1]
         }
-        if (options?.includes(null)) {
+        if (options?.some((option) => option.value === null)) {
           return value;
         }
         return value === null
@@ -70,16 +114,65 @@ const yupSchemas = {
           Check the PR#18 and tests for more details.
         */
       })
-      .oneOf(options, ({ value }) => {
-        return `The option ${JSON.stringify(value)} is not valid.`;
-      }),
-  date: string()
-    .nullable()
-    .trim()
-    .matches(
-      /(?:\d){4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|1[0-9]|2[0-9]|3[0-1])/,
-      `Must be a valid date in ${DEFAULT_DATE_FORMAT.toLocaleLowerCase()} format. e.g. ${todayDateHint}`
-    ),
+      .test(
+        'matchesOptionOrPattern',
+        ({ value }) => `The option ${JSON.stringify(value)} is not valid.`,
+        (value) => validateRadioOrSelectOptions(value, options)
+      );
+  },
+  date: ({ minDate, maxDate }) => {
+    let dateString = string()
+      .nullable()
+      .transform((value) => {
+        // @BUG RMT-518 - Same reason to radioOrSelectString above.
+        if (value === '') {
+          return undefined;
+        }
+
+        return value === null ? undefined : value;
+      })
+      .trim()
+      .matches(
+        /(?:\d){4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|1[0-9]|2[0-9]|3[0-1])/,
+        `Must be a valid date in ${DEFAULT_DATE_FORMAT.toLocaleLowerCase()} format. e.g. ${todayDateHint}`
+      );
+
+    if (minDate) {
+      dateString = dateString.test('minDate', `The date must be ${minDate} or after.`, (value) =>
+        validateMinDate(value, minDate)
+      );
+    }
+
+    if (maxDate) {
+      dateString = dateString.test('maxDate', `The date must be ${maxDate} or before.`, (value) =>
+        validateMaxDate(value, maxDate)
+      );
+    }
+
+    return dateString;
+  },
+  radioOrSelectNumber: (options) =>
+    mixed()
+      .typeError('The value must be a number')
+      .transform((value) => {
+        // @BUG RMT-518 - Same reason to radioOrSelectString above.
+        if (options?.some((option) => option.value === null)) {
+          return value;
+        }
+        return value === null ? undefined : value;
+      })
+      .test(
+        'matchesOptionOrPattern',
+        ({ value }) => {
+          return `The option ${JSON.stringify(value)} is not valid.`;
+        },
+        (value) => {
+          if (value !== undefined && typeof value !== 'number') return false;
+
+          return validateRadioOrSelectOptions(value, options);
+        }
+      )
+      .nullable(),
   number: number().typeError('The value must be a number').nullable(),
   file: array().nullable(),
   email: string().trim().email('Please enter a valid email address').nullable(),
@@ -109,13 +202,17 @@ function getRequiredErrorMessage(inputType, { inlineError, configError }) {
   return 'Required field';
 }
 
-const getJsonTypeInArray = (jsonType) =>
-  Array.isArray(jsonType)
+const getJsonTypeInArray = (jsonType) => {
+  return Array.isArray(jsonType)
     ? jsonType.find((val) => val !== 'null') // eg ["string", "null"] // optional fields - get the head type.
     : jsonType; // eg "string"
+};
 
 const getOptions = (field) => {
-  const allValues = field.options?.map((option) => option.value);
+  const allValues = field.options?.map((option) => ({
+    value: option.value,
+    pattern: option.pattern ? new RegExp(option.pattern) : null,
+  }));
 
   const isOptionalWithNull =
     Array.isArray(field.jsonType) &&
@@ -124,15 +221,31 @@ const getOptions = (field) => {
     // Otherwise the JSON Schema validator will fail as explained in PR#18
     field.jsonType.includes('null');
 
-  return isOptionalWithNull ? [...allValues, null] : allValues;
+  return isOptionalWithNull ? [...allValues, { option: null }] : allValues;
 };
 
 const getYupSchema = ({ inputType, ...field }) => {
   const jsonType = getJsonTypeInArray(field.jsonType);
+  const hasOptions = field.options?.length > 0;
 
-  if (field.options?.length > 0) {
+  const generateOptionSchema = (type) => {
     const optionValues = getOptions(field);
-    return yupSchemas.radioOrSelect(optionValues);
+    return type === 'number'
+      ? yupSchemas.radioOrSelectNumber(optionValues)
+      : yupSchemas.radioOrSelectString(optionValues);
+  };
+
+  if (hasOptions) {
+    if (Array.isArray(field.jsonType)) {
+      return field.jsonType.includes('number')
+        ? generateOptionSchema('number')
+        : generateOptionSchema('string');
+    }
+    return generateOptionSchema(field.jsonType);
+  }
+
+  if (field.format === 'date') {
+    return yupSchemas.date({ minDate: field.minDate, maxDate: field.maxDate });
   }
 
   return yupSchemas[inputType] || yupSchemasToJsonTypes[jsonType];
@@ -142,7 +255,7 @@ const getYupSchema = ({ inputType, ...field }) => {
  * @param {FieldParameters} field Input fields
  * @returns {Function} Yup schema
  */
-export function buildYupSchema(field, config) {
+export function buildYupSchema(field, config, logic) {
   const { inputType, jsonType: jsonTypeValue, errorMessage = {}, ...propertyFields } = field;
   const isCheckboxBoolean = typeof propertyFields.checkboxValue === 'boolean';
   let baseSchema;
@@ -262,6 +375,19 @@ export function buildYupSchema(field, config) {
     );
   }
 
+  function withConst(yupSchema) {
+    return yupSchema.test(
+      'isConst',
+      errorMessage.const ??
+        errorMessageFromConfig.const ??
+        `The only accepted value is ${propertyFields.const}.`,
+      (value) =>
+        (propertyFields.required === false && value === undefined) ||
+        value === null ||
+        value === propertyFields.const
+    );
+  }
+
   function withBaseSchema() {
     const customErrorMsg = errorMessage.type || errorMessageFromConfig.type;
     if (customErrorMsg) {
@@ -350,6 +476,18 @@ export function buildYupSchema(field, config) {
   if (propertyFields.accept) {
     validators.push(withFileFormat);
   }
+
+  // support const with 0 value
+  if (typeof propertyFields.const !== 'undefined') {
+    validators.push(withConst);
+  }
+
+  if (propertyFields.jsonLogicValidations) {
+    propertyFields.jsonLogicValidations.forEach((id) =>
+      validators.push(yupSchemaWithCustomJSONLogic({ field, id, logic, config }))
+    );
+  }
+
   return flow(validators);
 }
 

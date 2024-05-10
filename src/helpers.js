@@ -5,10 +5,52 @@ import omitBy from 'lodash/omitBy';
 import set from 'lodash/set';
 import { lazy } from 'yup';
 
+import { checkIfConditionMatchesProperties } from './checkIfConditionMatches';
 import { supportedTypes, getInputType } from './internals/fields';
 import { pickXKey } from './internals/helpers';
-import { containsHTML, hasProperty, wrapWithSpan } from './utils';
+import { processJSONLogicNode } from './jsonLogic';
+import { hasProperty } from './utils';
 import { buildCompleteYupSchema, buildYupSchema } from './yupSchema';
+
+/**
+ * List of custom JSF's attributes for field
+ * that are added dynamically after the first parsing.
+ */
+const dynamicInternalJsfAttrs = [
+  'isVisible', // Driven from conditionals state
+  'fields', // driven from group-array
+  'getComputedAttributes', // From json-logic
+  'computedAttributes', // From json-logic
+  'calculateConditionalProperties', // driven from conditionals
+  'calculateCustomValidationProperties', // To be deprecated in favor of json-logic
+  'scopedJsonSchema', // The respective JSON Schema
+
+  // HOTFIX/TODO Internal customizations, check test conditions.test.js for more info.
+  'Component',
+  'calculateDynamicProperties',
+  'visibilityCondition',
+];
+const dynamicInternalJsfAttrsObj = Object.fromEntries(
+  dynamicInternalJsfAttrs.map((k) => [k, true])
+);
+
+/**
+ *
+ * @param {Object} field - Current field attributes
+ * @param {Object} conditionalAttrs - Attributes from the matched conditional
+ * @param {Object} rootAttrs - Original field attributes from the root.
+ */
+function removeConditionalStaleAttributes(field, conditionalAttrs, rootAttrs) {
+  Object.keys(field).forEach((key) => {
+    if (
+      conditionalAttrs[key] === undefined &&
+      rootAttrs[key] === undefined && // Don't remove attrs that were declared in the root field.
+      dynamicInternalJsfAttrsObj[key] === undefined // ignore these because they are internal
+    ) {
+      field[key] = undefined;
+    }
+  });
+}
 
 /**
  * @typedef {import('./createHeadlessForm').FieldParameters} FieldParameters
@@ -29,7 +71,7 @@ function hasType(type, typeName) {
  * @param {Object[]} fields - form fields
  * @returns
  */
-function getField(fieldName, fields) {
+export function getField(fieldName, fields) {
   return fields.find(({ name }) => name === fieldName);
 }
 
@@ -39,8 +81,8 @@ function getField(fieldName, fields) {
  * @param {any} value
  * @returns
  */
-function validateFieldSchema(field, value) {
-  const validator = buildYupSchema(field);
+export function validateFieldSchema(field, value, logic) {
+  const validator = buildYupSchema(field, {}, logic);
   return validator().isValidSync(value);
 }
 
@@ -52,7 +94,7 @@ function validateFieldSchema(field, value) {
  * @param {any} schemaValue - value specified in the schema
  * @returns {Boolean}
  */
-function compareFormValueWithSchemaValue(formValue, schemaValue) {
+export function compareFormValueWithSchemaValue(formValue, schemaValue) {
   // If the value is a number, we can use it directly, otherwise we need to
   //  fallback to undefined since JSON-schemas empty values come represented as null
   const currentPropertyValue =
@@ -60,66 +102,6 @@ function compareFormValueWithSchemaValue(formValue, schemaValue) {
   // We're using the stringified version of both values since numeric values from forms come represented as Strings.
   // By doing this, we're sure that we're comparing the same type.
   return String(formValue) === String(currentPropertyValue);
-}
-
-/**
- * Checks if a "IF" condition matches given the current form state
- * @param {Object} node - JSON schema node
- * @param {Object} formValues - form state
- * @returns {Boolean}
- */
-function checkIfConditionMatches(node, formValues, formFields) {
-  return Object.keys(node.if.properties).every((name) => {
-    const currentProperty = node.if.properties[name];
-    const value = formValues[name];
-    const hasEmptyValue =
-      typeof value === 'undefined' ||
-      // NOTE: This is a "Remote API" dependency, as empty fields are sent as "null".
-      value === null;
-    const hasIfExplicit = node.if.required?.includes(name);
-
-    if (hasEmptyValue && !hasIfExplicit) {
-      // A property with empty value in a "if" will always match (lead to "then"),
-      // even if the actual conditional isn't true. Unless it's explicit in the if.required.
-      // WRONG:: if: { properties: { foo: {...} } }
-      // CORRECT:: if: { properties: { foo: {...} }, required: ['foo'] }
-      // Check MR !14408 for further explanation about the official specs
-      // https://json-schema.org/understanding-json-schema/reference/conditionals.html#if-then-else
-      return true;
-    }
-
-    if (hasProperty(currentProperty, 'const')) {
-      return compareFormValueWithSchemaValue(value, currentProperty.const);
-    }
-
-    if (currentProperty.contains?.pattern) {
-      // TODO: remove this || after D#4098 is merged and transformValue does not run for the parser anymore
-      const formValue = value || [];
-
-      // Making sure the form value type matches the expected type (array) when theres' a "contains" condition
-      if (Array.isArray(formValue)) {
-        const pattern = new RegExp(currentProperty.contains.pattern);
-        return (value || []).some((item) => pattern.test(item));
-      }
-    }
-
-    if (currentProperty.enum) {
-      return currentProperty.enum.includes(value);
-    }
-
-    const field = getField(name, formFields);
-
-    return validateFieldSchema(
-      {
-        options: field.options,
-        // @TODO/CODE SMELL. We are passing the property (raw field), but buildYupSchema() expected the output field.
-        ...currentProperty,
-        inputType: field.inputType,
-        required: true,
-      },
-      value
-    );
-  });
 }
 
 /**
@@ -181,7 +163,17 @@ function getPrefillSubFieldValues(field, defaultValues, parentFieldKeyPath) {
     // getDefaultValues and getPrefillSubFieldValues have a circluar dependency, resulting in one having to be used before defined.
     // As function declarations are hoisted this should not be a problem.
     // eslint-disable-next-line no-use-before-define
-    initialValue = getPrefillValues([field], initialValue);
+
+    if (typeof initialValue !== 'object') {
+      console.warn(
+        `Field "${parentFieldKeyPath}"'s value is "${initialValue}", but should be type object.`
+      );
+      initialValue = getPrefillValues([field], {
+        // TODO nested fieldsets are not handled
+      });
+    } else {
+      initialValue = getPrefillValues([field], initialValue);
+    }
   }
 
   return initialValue;
@@ -228,7 +220,7 @@ export function getPrefillValues(fields, initialValues = {}) {
  * @param {Object} node - JSON-schema node
  * @returns
  */
-function updateField(field, requiredFields, node, formValues) {
+function updateField(field, requiredFields, node, formValues, logic, config) {
   // If there was an error building the field, it might not exist in the form even though
   // it can be mentioned in the schema so we return early in that case
   if (!field) {
@@ -250,9 +242,9 @@ function updateField(field, requiredFields, node, formValues) {
     field.isVisible = true;
   }
 
-  const updateValues = (fieldValues) =>
-    Object.entries(fieldValues).forEach(([key, value]) => {
-      // some values (eg "schema") are a function, so we need to call it here
+  const updateAttributes = (fieldAttrs) => {
+    Object.entries(fieldAttrs).forEach(([key, value]) => {
+      // some attributes' value (eg "schema") are a function, so we need to call it here
       field[key] = typeof value === 'function' ? value() : value;
 
       if (key === 'value') {
@@ -260,9 +252,9 @@ function updateField(field, requiredFields, node, formValues) {
         // unless it's a read-only field
         // If the readOnly property has changed, use that updated value,
         // otherwise use the start value of the property
-        const readOnlyPropertyWasUpdated = typeof fieldValues.readOnly !== 'undefined';
+        const readOnlyPropertyWasUpdated = typeof fieldAttrs.readOnly !== 'undefined';
         const isReadonlyByDefault = field.readOnly;
-        const isReadonly = readOnlyPropertyWasUpdated ? fieldValues.readOnly : isReadonlyByDefault;
+        const isReadonly = readOnlyPropertyWasUpdated ? fieldAttrs.readOnly : isReadonlyByDefault;
 
         // Needs field.type check because otherwise checkboxes will have an initial
         // value of "true" when they should be not checked. !8755 for full context
@@ -274,20 +266,38 @@ function updateField(field, requiredFields, node, formValues) {
         }
       }
     });
+  };
+
+  if (field.getComputedAttributes) {
+    const newAttributes = field.getComputedAttributes({
+      field,
+      isRequired: fieldIsRequired,
+      node,
+      formValues,
+      config,
+      logic,
+    });
+    updateAttributes(newAttributes);
+  }
 
   // If field has a calculateConditionalProperties closure, run it and update the field properties
   if (field.calculateConditionalProperties) {
-    const newFieldValues = field.calculateConditionalProperties(fieldIsRequired, node);
-    updateValues(newFieldValues);
+    const { rootFieldAttrs, newAttributes } = field.calculateConditionalProperties({
+      isRequired: fieldIsRequired,
+      conditionBranch: node,
+      formValues,
+    });
+    updateAttributes(newAttributes);
+    removeConditionalStaleAttributes(field, newAttributes, rootFieldAttrs);
   }
 
   if (field.calculateCustomValidationProperties) {
-    const newFieldValues = field.calculateCustomValidationProperties(
+    const newAttributes = field.calculateCustomValidationProperties(
       fieldIsRequired,
       node,
       formValues
     );
-    updateValues(newFieldValues);
+    updateAttributes(newAttributes);
   }
 }
 
@@ -305,42 +315,55 @@ function updateField(field, requiredFields, node, formValues) {
  * @param {Set} accRequired - set of required field names gathered by traversing the tree
  * @returns {Object}
  */
-function processNode(node, formValues, formFields, accRequired = new Set()) {
+export function processNode({
+  node,
+  formValues,
+  formFields,
+  accRequired = new Set(),
+  parentID = 'root',
+  logic,
+}) {
   // Set initial required fields
   const requiredFields = new Set(accRequired);
 
   // Go through the node properties definition and update each field accordingly
   Object.keys(node.properties ?? []).forEach((fieldName) => {
     const field = getField(fieldName, formFields);
-    updateField(field, requiredFields, node, formValues);
+    updateField(field, requiredFields, node, formValues, logic, { parentID });
   });
 
   // Update required fields based on the `required` property and mutate node if needed
   node.required?.forEach((fieldName) => {
     requiredFields.add(fieldName);
-    updateField(getField(fieldName, formFields), requiredFields, node, formValues);
+    updateField(getField(fieldName, formFields), requiredFields, node, formValues, logic, {
+      parentID,
+    });
   });
 
   if (node.if) {
-    const matchesCondition = checkIfConditionMatches(node, formValues, formFields);
+    const matchesCondition = checkIfConditionMatchesProperties(node, formValues, formFields, logic);
     // BUG HERE (unreleated) - what if it matches but doesn't has a then,
     // it should do nothing, but instead it jumps to node.else when it shouldn't.
     if (matchesCondition && node.then) {
-      const { required: branchRequired } = processNode(
-        node.then,
+      const { required: branchRequired } = processNode({
+        node: node.then,
         formValues,
         formFields,
-        requiredFields
-      );
+        accRequired: requiredFields,
+        parentID,
+        logic,
+      });
 
       branchRequired.forEach((field) => requiredFields.add(field));
     } else if (node.else) {
-      const { required: branchRequired } = processNode(
-        node.else,
+      const { required: branchRequired } = processNode({
+        node: node.else,
         formValues,
         formFields,
-        requiredFields
-      );
+        accRequired: requiredFields,
+        parentID,
+        logic,
+      });
       branchRequired.forEach((field) => requiredFields.add(field));
     }
   }
@@ -354,14 +377,23 @@ function processNode(node, formValues, formFields, accRequired = new Set()) {
     node.anyOf.forEach(({ required = [] }) => {
       required.forEach((fieldName) => {
         const field = getField(fieldName, formFields);
-        updateField(field, requiredFields, node, formValues);
+        updateField(field, requiredFields, node, formValues, logic, { parentID });
       });
     });
   }
 
   if (node.allOf) {
     node.allOf
-      .map((allOfNode) => processNode(allOfNode, formValues, formFields, requiredFields))
+      .map((allOfNode) =>
+        processNode({
+          node: allOfNode,
+          formValues,
+          formFields,
+          accRequired: requiredFields,
+          parentID,
+          logic,
+        })
+      )
       .forEach(({ required: allOfItemRequired }) => {
         allOfItemRequired.forEach(requiredFields.add, requiredFields);
       });
@@ -372,9 +404,27 @@ function processNode(node, formValues, formFields, accRequired = new Set()) {
       const inputType = getInputType(nestedNode);
       if (inputType === supportedTypes.FIELDSET) {
         // It's a fieldset, which might contain scoped conditions
-        processNode(nestedNode, formValues[name] || {}, getField(name, formFields).fields);
+        processNode({
+          node: nestedNode,
+          formValues: formValues[name] || {},
+          formFields: getField(name, formFields).fields,
+          parentID: name,
+          logic,
+        });
       }
     });
+  }
+
+  if (node['x-jsf-logic']) {
+    const { required: requiredFromLogic } = processJSONLogicNode({
+      node: node['x-jsf-logic'],
+      formValues,
+      formFields,
+      accRequired: requiredFields,
+      parentID,
+      logic,
+    });
+    requiredFromLogic.forEach((field) => requiredFields.add(field));
   }
 
   return {
@@ -407,11 +457,11 @@ function clearValuesIfNotVisible(fields, formValues) {
  * @param {Object} formValues - current values of the form
  * @param {Object} jsonSchema - JSON schema object
  */
-export function updateFieldsProperties(fields, formValues, jsonSchema) {
+export function updateFieldsProperties(fields, formValues, jsonSchema, logic) {
   if (!jsonSchema?.properties) {
     return;
   }
-  processNode(jsonSchema, formValues, fields);
+  processNode({ node: jsonSchema, formValues, formFields: fields, logic });
   clearValuesIfNotVisible(fields, formValues);
 }
 
@@ -447,10 +497,10 @@ function getFieldOptions(node, presentation) {
   }
 
   // it's similar to inputType=radio
-  if (node.oneOf) {
+  if (node.oneOf || presentation.inputType === 'radio') {
     // Do not do if(hasType("string")) because a JSON Schema does not need it
     // necessarily to be considered a valid json schema.
-    return convertToOptions(node.oneOf);
+    return convertToOptions(node.oneOf || []);
   }
 
   // it's similar to inputType=select multiple
@@ -474,16 +524,27 @@ export function extractParametersFromNode(schemaNode) {
 
   const presentation = pickXKey(schemaNode, 'presentation') ?? {};
   const errorMessage = pickXKey(schemaNode, 'errorMessage') ?? {};
+  const jsonLogicValidations = schemaNode['x-jsf-logic-validations'];
+  const computedAttributes = schemaNode['x-jsf-logic-computedAttrs'];
 
+  // This is when a forced value is computed.
+  const decoratedComputedAttributes = getDecoratedComputedAttributes(computedAttributes);
   const node = omit(schemaNode, ['x-jsf-presentation', 'presentation']);
 
   const description = presentation?.description || node.description;
-  const statementDescription = containsHTML(presentation.statement?.description)
-    ? wrapWithSpan(presentation.statement.description, { class: 'jsf-statement' })
-    : presentation.statement?.description;
+  const statementDescription = presentation.statement?.description;
+
+  const value =
+    typeof node.const !== 'undefined' &&
+    typeof node.default !== 'undefined' &&
+    node.const === node.default
+      ? { forcedValue: node.const }
+      : {};
 
   return omitBy(
     {
+      const: node.const,
+      ...value,
       label: node.title,
       readOnly: node.readOnly,
       ...(node.deprecated && {
@@ -503,6 +564,7 @@ export function extractParametersFromNode(schemaNode) {
       maximum: node.maximum,
       maxFileSize: node.maxFileSize, // @deprecated in favor of presentation.maxFileSize
       default: node.default,
+      format: node.format,
       // Checkboxes conditions
       // — For checkboxes that only accept one value (string)
       ...(presentation?.inputType === 'checkbox' && { checkboxValue: node.const }),
@@ -518,14 +580,10 @@ export function extractParametersFromNode(schemaNode) {
 
       // Handle [name].presentation
       ...presentation,
-      description: containsHTML(description)
-        ? wrapWithSpan(description, {
-            class: 'jsf-description',
-          })
-        : description,
-      extra: containsHTML(presentation.extra)
-        ? wrapWithSpan(presentation.extra, { class: 'jsf-extra' })
-        : presentation.extra,
+      jsonLogicValidations,
+      computedAttributes: decoratedComputedAttributes,
+      description,
+      extra: presentation.extra,
       statement: presentation.statement && {
         ...presentation.statement,
         description: statementDescription,
@@ -575,8 +633,8 @@ export function yupToFormErrors(yupError) {
  * @param {JsfConfig} config - jsf config
  * @returns {Function(values: Object): { YupError: YupObject, formErrors: Object }} Callback that returns Yup errors <YupObject>
  */
-export const handleValuesChange = (fields, jsonSchema, config) => (values) => {
-  updateFieldsProperties(fields, values, jsonSchema);
+export const handleValuesChange = (fields, jsonSchema, config, logic) => (values) => {
+  updateFieldsProperties(fields, values, jsonSchema, logic);
 
   const lazySchema = lazy(() => buildCompleteYupSchema(fields, config));
   let errors;
@@ -599,3 +657,14 @@ export const handleValuesChange = (fields, jsonSchema, config) => (values) => {
     formErrors: yupToFormErrors(errors),
   };
 };
+
+function getDecoratedComputedAttributes(computedAttributes) {
+  const isEqualConstAndDefault = computedAttributes?.const === computedAttributes?.default;
+
+  return {
+    ...(computedAttributes ?? {}),
+    ...(computedAttributes?.const && computedAttributes?.default && isEqualConstAndDefault
+      ? { forcedValue: computedAttributes.const }
+      : {}),
+  };
+}

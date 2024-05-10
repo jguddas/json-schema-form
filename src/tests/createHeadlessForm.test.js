@@ -13,11 +13,13 @@ import {
   schemaInputRadioOptionalNull,
   schemaInputRadioOptionalConventional,
   schemaInputTypeRadioOptionsWithDetails,
+  schemaInputTypeRadioWithoutOptions,
   schemaInputTypeSelectSoloDeprecated,
   schemaInputTypeSelectSolo,
   schemaInputTypeSelectMultipleDeprecated,
   schemaInputTypeSelectMultiple,
   schemaInputTypeSelectMultipleOptional,
+  schemaInputTypeFieldset,
   schemaInputTypeNumber,
   schemaInputTypeNumberZeroMaximum,
   schemaInputTypeDate,
@@ -37,6 +39,7 @@ import {
   mockFileInput,
   mockRadioCardInput,
   mockRadioCardExpandableInput,
+  mockTelWithPattern,
   mockTextInput,
   mockTextInputDeprecated,
   mockNumberInput,
@@ -57,6 +60,7 @@ import {
   schemaForErrorMessageSpecificity,
   jsfConfigForErrorMessageSpecificity,
 } from './helpers';
+import { mockConsole, restoreConsoleAndEnsureItWasNotCalled } from './testUtils';
 
 function buildJSONSchemaInput({ presentationFields, inputFields = {}, required }) {
   return {
@@ -92,14 +96,8 @@ const getField = (fields, name, ...subNames) => {
   return field;
 };
 
-beforeEach(() => {
-  jest.spyOn(console, 'error').mockImplementation(() => {});
-});
-
-afterEach(() => {
-  expect(console.error).not.toHaveBeenCalled();
-  console.error.mockRestore();
-});
+beforeEach(mockConsole);
+afterEach(restoreConsoleAndEnsureItWasNotCalled);
 
 describe('createHeadlessForm', () => {
   it('returns empty result given no schema', () => {
@@ -448,7 +446,7 @@ describe('createHeadlessForm', () => {
         [fieldName]: 'The option "blah-blah" is not valid.',
       });
 
-      // Given undefined, it says it's a  required field.
+      // Given undefined, it says it's a required field.
       expect(validateForm({})).toEqual({
         [fieldName]: 'Required field',
       });
@@ -817,6 +815,7 @@ describe('createHeadlessForm', () => {
           has_car: 'yes',
         })
       ).toBeUndefined();
+
       expect(validateForm({})).toEqual({
         has_siblings: 'Required field',
       });
@@ -903,6 +902,15 @@ describe('createHeadlessForm', () => {
           },
         },
       ]);
+    });
+
+    it('support "radio" field type without oneOf options', () => {
+      const result = createHeadlessForm(schemaInputTypeRadioWithoutOptions);
+
+      expect(result.fields).toHaveLength(1);
+
+      const fieldOptions = result.fields[0].options;
+      expect(fieldOptions).toEqual([]);
     });
 
     it('support "number" field type', () => {
@@ -1010,30 +1018,112 @@ describe('createHeadlessForm', () => {
     });
 
     it('support "date" field type', () => {
-      const result = createHeadlessForm(schemaInputTypeDate);
+      const { fields, handleValidation } = createHeadlessForm(schemaInputTypeDate);
 
-      expect(result).toMatchObject({
-        fields: [
-          {
-            label: 'Birthdate',
-            name: 'birthdate',
-            required: true,
-            schema: expect.any(Object),
-            type: 'date',
-            maxLength: 10,
-            minDate: '1922-03-01',
-            maxDate: '2022-03-01',
-          },
-        ],
+      const validateForm = (vals) => friendlyError(handleValidation(vals));
+
+      expect(fields[0]).toMatchObject({
+        label: 'Birthdate',
+        name: 'birthdate',
+        required: true,
+        schema: expect.any(Object),
+        type: 'date',
+        minDate: '1922-03-01',
+        maxDate: '2022-03-17',
       });
 
-      const fieldValidator = result.fields[0].schema;
       const todayDateHint = new Date().toISOString().substring(0, 10);
-      expect(fieldValidator.isValidSync('2020-10-10')).toBe(true);
-      expect(fieldValidator.isValidSync('2020-13-10')).toBe(false);
-      expect(() => fieldValidator.validateSync('')).toThrowError(
-        `Must be a valid date in yyyy-mm-dd format. e.g. ${todayDateHint}`
-      );
+
+      expect(validateForm({})).toEqual({
+        birthdate: 'Required field',
+      });
+
+      expect(validateForm({ birthdate: '2020-10-10' })).toBeUndefined();
+      expect(validateForm({ birthdate: '2020-13-10' })).toEqual({
+        birthdate: `Must be a valid date in yyyy-mm-dd format. e.g. ${todayDateHint}`,
+      });
+    });
+
+    it('support "date" field type with a minDate', () => {
+      const { fields, handleValidation } = createHeadlessForm(schemaInputTypeDate);
+
+      const validateForm = (vals) => friendlyError(handleValidation(vals));
+
+      expect(fields[0]).toMatchObject({
+        label: 'Birthdate',
+        name: 'birthdate',
+        required: true,
+        schema: expect.any(Object),
+        type: 'date',
+        minDate: '1922-03-01',
+        maxDate: '2022-03-17',
+      });
+
+      expect(validateForm({})).toEqual({
+        birthdate: 'Required field',
+      });
+
+      expect(validateForm({ birthdate: '' })).toEqual({
+        birthdate: `Required field`,
+      });
+
+      expect(validateForm({ birthdate: '1922-02-01' })).toEqual({
+        birthdate: 'The date must be 1922-03-01 or after.',
+      });
+
+      expect(validateForm({ birthdate: '1922-03-01' })).toBeUndefined();
+
+      expect(validateForm({ birthdate: '2021-03-01' })).toBeUndefined();
+    });
+
+    it('support "date" field type with a maxDate', () => {
+      const { fields, handleValidation } = createHeadlessForm(schemaInputTypeDate);
+
+      const validateForm = (vals) => friendlyError(handleValidation(vals));
+
+      expect(fields[0]).toMatchObject({
+        label: 'Birthdate',
+        name: 'birthdate',
+        required: true,
+        schema: expect.any(Object),
+        type: 'date',
+        minDate: '1922-03-01',
+        maxDate: '2022-03-17',
+      });
+
+      expect(validateForm({ birthdate: '' })).toEqual({
+        birthdate: `Required field`,
+      });
+
+      expect(validateForm({ birthdate: '2022-02-01' })).toBeUndefined();
+      expect(validateForm({ birthdate: '2022-03-01' })).toBeUndefined();
+      expect(validateForm({ birthdate: '2022-04-01' })).toEqual({
+        birthdate: 'The date must be 2022-03-17 or before.',
+      });
+    });
+
+    it('support format date with minDate and maxDate', () => {
+      const schemaFormatDate = {
+        properties: {
+          birthdate: {
+            title: 'Birthdate',
+            type: 'string',
+            format: 'date',
+            'x-jsf-presentation': {
+              inputType: 'myDateType',
+              maxDate: '2022-03-01',
+              minDate: '1922-03-01',
+            },
+          },
+        },
+      };
+
+      const { handleValidation } = createHeadlessForm(schemaFormatDate);
+      const validateForm = (vals) => friendlyError(handleValidation(vals));
+
+      expect(validateForm({ birthdate: '1922-02-01' })).toEqual({
+        birthdate: 'The date must be 1922-03-01 or after.',
+      });
     });
 
     it('supports "file" field type', () => {
@@ -1298,6 +1388,50 @@ describe('createHeadlessForm', () => {
           ],
         });
       });
+
+      it('can be a conditional field', () => {
+        const { fields, handleValidation } = createHeadlessForm({
+          properties: {
+            yes_or_no: {
+              title: 'Show the dependents or not?',
+              oneOf: [{ const: 'yes' }, { const: 'no' }],
+              'x-jsf-presentation': { inputType: 'radio' },
+            },
+            dependent_details: mockGroupArrayInput,
+          },
+          allOf: [
+            {
+              if: {
+                properties: {
+                  yes_or_no: { const: 'yes' },
+                },
+                required: ['yes_or_no'],
+              },
+              then: {
+                required: ['dependent_details'],
+              },
+              else: {
+                properties: {
+                  dependent_details: false,
+                },
+              },
+            },
+          ],
+        });
+
+        // By default is hidden but the fields are accessible
+        expect(getField(fields, 'dependent_details').isVisible).toBe(false);
+        expect(getField(fields, 'dependent_details').fields).toEqual(expect.any(Function));
+
+        // When the condition matches...
+        const { formErrors } = handleValidation({ yes_or_no: 'yes' });
+        expect(formErrors).toEqual({
+          dependent_details: 'Required field',
+        });
+        // it gets visible with its inner fields.
+        expect(getField(fields, 'dependent_details').isVisible).toBe(true);
+        expect(getField(fields, 'dependent_details').fields).toEqual(expect.any(Function));
+      });
     });
 
     it('supports "radio" field type with its "card" and "card-expandable" variants', () => {
@@ -1363,6 +1497,51 @@ describe('createHeadlessForm', () => {
           },
         ],
       });
+    });
+
+    it('supports oneOf pattern validation', () => {
+      const result = createHeadlessForm(mockTelWithPattern);
+
+      expect(result).toMatchObject({
+        fields: [
+          {
+            label: 'Phone number',
+            name: 'phone_number',
+            type: 'tel',
+            required: false,
+            options: [
+              {
+                label: 'Portugal',
+                pattern: '^(\\+351)[0-9]{9,}$',
+              },
+              {
+                label: 'United Kingdom (UK)',
+                pattern: '^(\\+44)[0-9]{1,}$',
+              },
+              {
+                label: 'Bolivia',
+                pattern: '^(\\+591)[0-9]{9,}$',
+              },
+              {
+                label: 'Canada',
+                pattern: '^(\\+1)(206|224)[0-9]{1,}$',
+              },
+              {
+                label: 'United States',
+                pattern: '^(\\+1)[0-9]{1,}$',
+              },
+            ],
+          },
+        ],
+      });
+
+      const fieldValidator = result.fields[0].schema;
+
+      expect(fieldValidator.isValidSync('+351123123123')).toBe(true);
+      expect(() => fieldValidator.validateSync('+35100')).toThrowError(
+        'The option "+35100" is not valid.'
+      );
+      expect(fieldValidator.isValidSync(undefined)).toBe(true);
     });
 
     describe('supports "fieldset" field type', () => {
@@ -1642,11 +1821,8 @@ describe('createHeadlessForm', () => {
           expect(foodField.options).toHaveLength(4);
           // ...Food description was back to the original
           expect(foodField.description).toBeUndefined();
-
-          // @BUG RMT-58 PTO description should disappear, but it didn't.
-          expect(getField(fields, 'pto').description).toBe(
-            'Above 30 hours, the PTO needs to be at least 20 days.'
-          );
+          // ...PTO Description is removed too.
+          expect(getField(fields, 'pto').description).toBeUndefined();
 
           // Given again "low perks", the form valid.
           expect(
@@ -1853,6 +2029,45 @@ describe('createHeadlessForm', () => {
     });
   });
 
+  it('supports oneOf number const', () => {
+    const result = createHeadlessForm({
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        pets: {
+          title: 'How many pets?',
+          oneOf: [
+            {
+              title: 'One',
+              const: 0,
+            },
+            {
+              title: 'Two',
+              const: 2,
+            },
+            {
+              title: 'null',
+              const: 1,
+            },
+          ],
+          'x-jsf-presentation': {
+            inputType: 'select',
+          },
+          type: ['number', 'null'],
+        },
+      },
+      required: [],
+      'x-jsf-order': ['pets'],
+    });
+
+    const fieldValidator = result.fields[0].schema;
+
+    expect(fieldValidator.isValidSync(0)).toBe(true);
+    expect(fieldValidator.isValidSync(1)).toBe(true);
+    expect(() => fieldValidator.validateSync('2')).toThrowError('The option "2" is not valid.');
+    expect(fieldValidator.isValidSync(null)).toBe(true);
+  });
+
   describe('x-jsf-presentation attribute', () => {
     it('support field with "x-jsf-presentation.statement"', () => {
       const result = createHeadlessForm(schemaInputWithStatement);
@@ -1870,9 +2085,9 @@ describe('createHeadlessForm', () => {
             },
           },
           {
-            name: 'a_or_b',
-            label: 'A dropdown',
-            type: 'select',
+            name: 'role',
+            label: 'Role',
+            type: 'text',
             statement: {
               description: 'This is another statement message, but more severe.',
               inputType: 'statement',
@@ -1963,10 +2178,7 @@ describe('createHeadlessForm', () => {
       });
 
       expect(result).toMatchObject({
-        fields: [
-          { description: 'I am regular' },
-          { description: '<span class="jsf-description">I am <b>bold</b>.</span>' },
-        ],
+        fields: [{ description: 'I am regular' }, { description: 'I am <b>bold</b>.' }],
       });
     });
 
@@ -2453,7 +2665,7 @@ describe('createHeadlessForm', () => {
   });
 
   describe('when a field has conditional presentation properties', () => {
-    it('adds .jsf-statement to nested statement markup when visible', () => {
+    it('returns the nested properties when the conditional matches', () => {
       const { fields } = createHeadlessForm(schemaWithConditionalPresentationProperties, {
         initialValues: {
           // show the hidden statement
@@ -2461,9 +2673,7 @@ describe('createHeadlessForm', () => {
         },
       });
 
-      expect(fields[0].statement.description).toBe(
-        `<span class="jsf-statement"><a href="">conditional statement markup</a></span>`
-      );
+      expect(fields[0].statement.description).toBe(`<a href="">conditional statement markup</a>`);
     });
   });
 
@@ -3393,6 +3603,27 @@ describe('createHeadlessForm', () => {
           ],
         });
       });
+
+      it('should ignore initial values that do not match the field type (eg string vs object)', () => {
+        const result = createHeadlessForm(schemaInputTypeFieldset, {
+          initialValues: {
+            a_fieldset: 'foo', // should be an object instead of string
+          },
+        });
+
+        // It returns fields without errors
+        expect(result.fields).toBeDefined();
+        expect(result.fields[0].fields[0].name).toBe('id_number');
+        expect(result.fields[0].fields[1].name).toBe('tabs');
+
+        // Warn about those missmatched values
+        expect(console.warn).toHaveBeenCalledWith(
+          `Field "a_fieldset"'s value is "foo", but should be type object.`
+        );
+        console.warn.mockClear();
+
+        expect(console.error).not.toHaveBeenCalled();
+      });
     });
   });
 
@@ -3524,11 +3755,17 @@ describe('createHeadlessForm', () => {
           customProperties: {
             id_number: { 'data-field': 'field' },
             fieldset: {
-              id_number: { 'data-fieldset': 'fieldset' },
+              customProperties: {
+                id_number: { 'data-fieldset': 'fieldset' },
+              },
             },
             nestedFieldset: {
-              innerFieldset: {
-                id_number: { 'data-nested-fieldset': 'nested-fieldset' },
+              customProperties: {
+                innerFieldset: {
+                  customProperties: {
+                    id_number: { 'data-nested-fieldset': 'nested-fieldset' },
+                  },
+                },
               },
             },
           },
@@ -3601,6 +3838,58 @@ describe('createHeadlessForm', () => {
       expect(nestedFieldsetResult.fields[0].fields[1]).not.toHaveProperty('data-field');
       expect(nestedFieldsetResult.fields[0].fields[1]).not.toHaveProperty('data-fieldset');
     });
+    it('should handle custom properties when inside fieldsets for fields name clashing with reserved words', () => {
+      const { fields } = createHeadlessForm(
+        {
+          properties: {
+            dog: {
+              title: 'Dog details',
+              description: 'Fieldset description',
+              'x-jsf-presentation': {
+                inputType: 'fieldset',
+              },
+              properties: {
+                name: {
+                  // This fieldName (name) clashs with the field specs "name"
+                  title: 'Dogs name',
+                  'x-jsf-presentation': {
+                    inputType: 'text',
+                  },
+                  type: 'string',
+                },
+                type: {
+                  // This field name (type) clashs with the field specs "type"
+                  title: 'Breed type',
+                  'x-jsf-presentation': {
+                    inputType: 'number',
+                  },
+                  type: 'string',
+                },
+              },
+              required: ['name'],
+              type: 'object',
+            },
+          },
+          required: ['dog'],
+        },
+        {
+          customProperties: {
+            dog: {
+              customProperties: {
+                name: {
+                  description: "What's your dogs name",
+                },
+              },
+            },
+          },
+        }
+      );
+
+      expect(fields.length).toBe(1);
+      expect(fields[0].fields.length).toBe(2);
+      expect(fields[0].fields[0].name).toBe('name');
+      expect(fields[0].fields[0].description).toBe("What's your dogs name");
+    });
   });
 
   describe('presentation (deprecated in favor of x-jsf-presentation)', () => {
@@ -3640,7 +3929,7 @@ describe('createHeadlessForm', () => {
       expect(fields).toMatchObject([
         {
           name: 'time',
-          description: '<span class="jsf-description">Write in <b>hh:ss</b> format</span>', // from presentation
+          description: 'Write in <b>hh:ss</b> format', // from presentation
           inputType: 'clock', // arbitrary type from presentation
           deprecated: {
             description: 'In favor of X', // from presentation
